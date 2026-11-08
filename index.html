@@ -1273,10 +1273,29 @@
   }
 
   async function exportBinderPdf(b){
+    const filename = ((b.name || '無題') + '.pdf').replace(/[\\/:*?"<>|]/g, '_');
+    // Save dialog (Chrome/Edge). Opened before building the PDF: it needs the click's
+    // user activation, which would expire while a large PDF is being rendered.
+    let handle = null;
+    if('showSaveFilePicker' in window){
+      try{
+        handle = await window.showSaveFilePicker({
+          id: 'handwriting-memo-pdf', suggestedName: filename,
+          types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }]
+        });
+      }catch(err){
+        if(err && err.name === 'AbortError') return; // cancelled
+        handle = null; // e.g. blocked in an iframe: fall back to a normal download
+      }
+    }
     try{
       toast('PDFを作成中…');
       const blob = await buildPdfBlob(b.pages);
-      downloadBlob(blob, (b.name || '無題') + '.pdf');
+      if(handle){
+        const w = await handle.createWritable();
+        await w.write(blob);
+        await w.close();
+      }else downloadBlob(blob, filename);
       toast('PDFを保存しました');
     }catch(err){
       console.error(err);
