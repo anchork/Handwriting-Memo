@@ -1,5 +1,5 @@
 // アプリを更新したら CACHE_VERSION を上げてください(古いキャッシュが破棄されます)
-const CACHE_VERSION = 'v15';
+const CACHE_VERSION = 'v16';
 const CACHE_NAME = 'handwriting-memo-' + CACHE_VERSION;
 const APP_SHELL = [
   './',

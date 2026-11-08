@@ -66,10 +66,10 @@
     padding:6px;
   }
   #side-bar .divider{ width:22px; height:1px; margin:3px 0; }
-  /* bottom right: page navigation */
+  /* bottom left: page navigation */
   #page-bar{
     position:fixed; z-index:10;
-    right: calc(12px + env(safe-area-inset-right));
+    left: calc(12px + env(safe-area-inset-left));
     bottom: calc(12px + env(safe-area-inset-bottom));
   }
   #top-row{
@@ -152,7 +152,7 @@
     flex-shrink:0;
   }
   #hint{
-    position:fixed; left:16px; bottom: calc(20px + env(safe-area-inset-bottom));
+    position:fixed; right:16px; bottom: calc(20px + env(safe-area-inset-bottom));
     max-width:230px;
     font-size:12px; line-height:1.6;
     color: var(--text-muted);
