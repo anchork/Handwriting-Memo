@@ -300,6 +300,9 @@
       <option value="4">400%</option>
       <option value="fit">全体を表示</option>
     </select>
+    <button class="btn" id="pan-lock" title="パン(移動)をロック" aria-pressed="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18"/><path d="m9 6 3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3"/></svg>
+    </button>
     <button class="btn" id="zoom-lock" title="ズームをロック" aria-pressed="false">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path id="zoom-lock-shackle" d="M8 11V7a4 4 0 0 1 7.5-2"/></svg>
     </button>
@@ -334,7 +337,7 @@
 </div>
 
 <div id="hint">
-  ペン/マウスで描く。指1本でパン、2本でパン&ズーム。マウスホイールでもズームできます。鍵ボタンでズームを固定できます。
+  ペン/マウスで描く。指1本でパン、2本でパン&ズーム。マウスホイールでもズームできます。矢印ボタンでパン、鍵ボタンでズームを固定できます。
 </div>
 
 <!-- binder screen -->
@@ -811,6 +814,7 @@
       return;
     }
     if(spacePressed){
+      if(panLocked){ toast('パンはロック中です'); return; }
       const pos = rectPos(e);
       mousePan = { startX: pos.x, startY: pos.y, start: { ...currentTransform() } };
       return;
@@ -831,6 +835,7 @@
       const ids = [...gestureStart.pointers.keys()];
       const t = currentTransform();
       if(ids.length === 1){
+        if(panLocked) return;
         const id0 = ids[0];
         const p0 = gestureStart.pointers.get(id0);
         const p1 = touchPointers.get(id0);
@@ -851,8 +856,10 @@
           : clamp(gestureStart.transform.scale * (dist1/Math.max(dist0,1e-6)), MIN_SCALE, MAX_SCALE);
         const worldMid = screenToWorld(mid0.x, mid0.y, gestureStart.transform);
         t.scale = newScale;
-        t.x = mid1.x - worldMid.x*newScale;
-        t.y = mid1.y - worldMid.y*newScale;
+        // pan locked: zoom around where the pinch started, ignore finger travel
+        const anchor = panLocked ? mid0 : mid1;
+        t.x = anchor.x - worldMid.x*newScale;
+        t.y = anchor.y - worldMid.y*newScale;
       }
       markViewDirty();
       render();
@@ -895,7 +902,7 @@
     const pos = rectPos(e);
     const t = currentTransform();
     if(zoomLocked){
-      if(e.ctrlKey) return; // trackpad pinch
+      if(e.ctrlKey || panLocked) return; // trackpad pinch / both locked
       t.x -= e.deltaX; t.y -= e.deltaY;
       markViewDirty(); render();
       return;
@@ -962,6 +969,20 @@
     document.getElementById('zoom-lock-shackle').setAttribute('d', on ? 'M8 11V7a4 4 0 0 1 8 0v4' : 'M8 11V7a4 4 0 0 1 7.5-2');
     zoomSelect.disabled = on;
   }
+  const panLockBtn = document.getElementById('pan-lock');
+  let panLocked = false;
+  function setPanLocked(on){
+    panLocked = on;
+    panLockBtn.classList.toggle('active', on);
+    panLockBtn.setAttribute('aria-pressed', String(on));
+    panLockBtn.title = on ? 'パンのロックを解除' : 'パン(移動)をロック';
+    if(on){ mousePan = null; if(gestureStart) updateGestureStart(); }
+  }
+  panLockBtn.addEventListener('click', ()=>{
+    setPanLocked(!panLocked);
+    toast(panLocked ? 'パンをロックしました' : 'パンのロックを解除しました');
+    scheduleSave();
+  });
   zoomLockBtn.addEventListener('click', ()=>{
     setZoomLocked(!zoomLocked);
     toast(zoomLocked ? 'ズームをロックしました' : 'ズームのロックを解除しました');
@@ -1501,7 +1522,7 @@
       dirty.forEach(id=>{ const b = binders.find(x=>x.id === id); if(b) bs.put(b); });
       deleted.forEach(id=>bs.delete(id));
       tx.objectStore('meta').put({
-        order: binders.map(b=>b.id), binderIndex, darkOverride, tool, widths: { ...widths }, penColor, zoomLocked
+        order: binders.map(b=>b.id), binderIndex, darkOverride, tool, widths: { ...widths }, penColor, zoomLocked, panLocked
       }, 'meta');
       dirty.clear(); deleted.clear();
       tx.onabort = ()=>{
@@ -1546,6 +1567,7 @@
       if(['ink','red','yellow','blue'].includes(meta.penColor)) setPenColor(meta.penColor);
       setTool(meta.tool === 'eraser' ? 'eraser' : 'pencil');
       setZoomLocked(meta.zoomLocked === true);
+      setPanLocked(meta.panLocked === true);
     }
     return valid.length > 0;
   }
