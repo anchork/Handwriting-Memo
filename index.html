@@ -66,6 +66,12 @@
     padding:6px;
   }
   #side-bar .divider{ width:22px; height:1px; margin:3px 0; }
+  /* bottom right: page navigation */
+  #page-bar{
+    position:fixed; z-index:10;
+    right: calc(12px + env(safe-area-inset-right));
+    bottom: calc(12px + env(safe-area-inset-bottom));
+  }
   #top-row{
     position:fixed; top:0; left:0; right:0; z-index:10;
     /* keep clear of the side bar (12 + 54 + 8) */
@@ -178,7 +184,7 @@
   }
   #canvas.eraser-hover{ cursor:none; }
   #toast{
-    position:fixed; bottom: calc(24px + env(safe-area-inset-bottom)); left:50%; transform:translateX(-50%);
+    position:fixed; bottom: calc(76px + env(safe-area-inset-bottom)); left:50%; transform:translateX(-50%);
     background: var(--btn-active-bg); color: var(--btn-active-fg);
     padding:8px 16px; border-radius:999px; font-size:12.5px;
     max-width: calc(100vw - 32px); text-align:center;
@@ -336,23 +342,23 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path id="zoom-lock-shackle" d="M8 11V7a4 4 0 0 1 7.5-2"/></svg>
       </button>
     </div>
-    <div class="divider"></div>
-    <div class="grp">
-      <button class="btn" id="page-prev" title="前のページ">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
-      </button>
-      <span id="page-label">1 / 1</span>
-      <button class="btn" id="page-next" title="次のページ">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
-      </button>
-      <button class="btn" id="page-add" title="ページを追加">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
-      </button>
-      <button class="btn" id="page-delete" title="このページを削除(2回押す)">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-      </button>
-    </div>
   </div>
+</div>
+
+<div id="page-bar" class="floating">
+  <button class="btn" id="page-prev" title="前のページ">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+  </button>
+  <span id="page-label">1 / 1</span>
+  <button class="btn" id="page-next" title="次のページ">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+  </button>
+  <button class="btn" id="page-add" title="ページを追加">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+  </button>
+  <button class="btn" id="page-delete" title="このページを削除(2回押す)">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+  </button>
 </div>
 
 <div id="hint">
@@ -1103,7 +1109,8 @@
     const bb = boundingBox(page);
     const top = document.getElementById('main-bar').getBoundingClientRect().bottom + 8;
     const left = document.getElementById('side-bar').getBoundingClientRect().right + 8;
-    const availW = window.innerWidth - left - 16, availH = window.innerHeight - top - 16;
+    const bottom = document.getElementById('page-bar').getBoundingClientRect().top - 8;
+    const availW = window.innerWidth - left - 16, availH = bottom - top;
     const t = currentTransform();
     t.scale = clamp(Math.min(availW/(bb.maxX-bb.minX), availH/(bb.maxY-bb.minY)), MIN_SCALE, MAX_SCALE);
     t.x = left + availW/2 - (bb.minX+bb.maxX)/2*t.scale;
