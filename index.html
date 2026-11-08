@@ -425,34 +425,247 @@
   window.addEventListener('resize', resize);
 
   // ---------- rendering ----------
-  function drawStroke(g, stroke, t, dk){
+  // Strokes stay as vector data (needed for zoom, dark mode and the SVG/HTML files),
+  // but the screen is drawn from a bitmap cache:
+  //  - panning only blits the cached bitmap (cost does not grow with stroke count)
+  //  - new pen input is drawn incrementally onto the cache
+  //  - zooming shows the scaled bitmap and re-rasterizes once the gesture pauses
+  const strokeBoxes = new WeakMap();
+  function strokeBBox(s){
+    const c = strokeBoxes.get(s);
+    if(c && c.n === s.points.length) return c;
+    let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+    for(const p of s.points){
+      if(p.x<minX)minX=p.x; if(p.x>maxX)maxX=p.x;
+      if(p.y<minY)minY=p.y; if(p.y>maxY)maxY=p.y;
+    }
+    const r = s.width;
+    const box = { n: s.points.length, minX:minX-r, minY:minY-r, maxX:maxX+r, maxY:maxY+r };
+    strokeBoxes.set(s, box);
+    return box;
+  }
+
+  // from: first point index not yet drawn (for incremental drawing)
+  // view: optional world-space rect; strokes outside it are skipped
+  function drawStroke(g, stroke, t, dk, from, view){
     const pts = stroke.points;
     if(pts.length === 0) return;
+    if(view){
+      const b = strokeBBox(stroke);
+      if(b.maxX < view.minX || b.minX > view.maxX || b.maxY < view.minY || b.minY > view.maxY) return;
+    }
     const erasing = stroke.tool === 'eraser';
-    g.globalCompositeOperation = erasing ? 'destination-out' : 'source-over';
     const color = erasing ? 'rgba(0,0,0,1)' : colorFor(stroke.color, dk);
+    g.globalCompositeOperation = erasing ? 'destination-out' : 'source-over';
     g.strokeStyle = color;
     g.fillStyle = color;
     g.lineJoin = 'round';
     g.lineCap = 'round';
+    const sc = t.scale, tx = t.x, ty = t.y;
     if(pts.length === 1){
-      const p = worldToScreen(pts[0], t);
-      const r = Math.max((stroke.width*t.scale*(0.5+0.5*(pts[0].p ?? 0.5)))/2, 0.5);
-      g.beginPath(); g.arc(p.x, p.y, r, 0, Math.PI*2); g.fill();
-      g.globalCompositeOperation = 'source-over';
-      return;
-    }
-    for(let i=1;i<pts.length;i++){
-      const p0 = worldToScreen(pts[i-1], t);
-      const p1 = worldToScreen(pts[i], t);
-      const w = Math.max(stroke.width*t.scale*(0.5+0.5*(pts[i].p ?? 0.5)), 0.5);
-      g.lineWidth = w;
-      g.beginPath();
-      g.moveTo(p0.x, p0.y);
-      g.lineTo(p1.x, p1.y);
-      g.stroke();
+      if(!from){
+        const p = pts[0];
+        const r = Math.max((stroke.width*sc*(0.5+0.5*(p.p ?? 0.5)))/2, 0.5);
+        g.beginPath(); g.arc(p.x*sc+tx, p.y*sc+ty, r, 0, Math.PI*2); g.fill();
+      }
+    }else{
+      // one path per run of equal (quantized) width instead of one per segment
+      let cur = -1, open = false;
+      for(let i=Math.max(1, from || 0); i<pts.length; i++){
+        const w = Math.max(Math.round(stroke.width*sc*(0.5+0.5*(pts[i].p ?? 0.5))*4)/4, 0.5);
+        if(w !== cur){
+          if(open) g.stroke();
+          cur = w; g.lineWidth = w;
+          g.beginPath();
+          g.moveTo(pts[i-1].x*sc+tx, pts[i-1].y*sc+ty);
+          open = true;
+        }
+        g.lineTo(pts[i].x*sc+tx, pts[i].y*sc+ty);
+      }
+      if(open) g.stroke();
     }
     g.globalCompositeOperation = 'source-over';
+  }
+
+  // Tiles: TILE x TILE device-px bitmaps on a grid in "world * S" space
+  // (S = zoom * devicePixelRatio). A tile is rendered once from the vector data and
+  // then just blitted while panning; new pen input is drawn into existing tiles.
+  const TILE = 512, MAX_TILES = 80, TILE_BUDGET_MS = 10;
+  const tilePool = [];
+  let tiles = null;     // current tile set
+  let oldTiles = null;  // previous zoom level, shown underneath while new tiles fill in
+  let regenTimer = null, prefetchQueued = false;
+
+  function newTileSet(){
+    const page = currentPage();
+    const ts = { S: page.transform.scale*dpr, dark, dpr, page, map: new Map(), si:0, pi:0 };
+    syncCursor(ts);
+    return ts;
+  }
+  function releaseTileSet(ts){
+    if(!ts) return;
+    ts.map.forEach(c=>{ if(c && tilePool.length < 8) tilePool.push(c); });
+    ts.map.clear();
+  }
+  function allocTile(){
+    const c = tilePool.pop() || (()=>{ const cv = document.createElement('canvas'); cv.width = cv.height = TILE; return { canvas: cv, ctx: cv.getContext('2d') }; })();
+    c.ctx.setTransform(1,0,0,1,0,0);
+    c.ctx.clearRect(0,0,TILE,TILE);
+    return c;
+  }
+  function syncCursor(ts){
+    const ss = ts.page.strokes, n = ss.length;
+    ts.si = Math.max(n-1, 0);
+    ts.pi = n ? ss[n-1].points.length : 0;
+  }
+  function hasPending(ts){
+    const ss = ts.page.strokes, n = ss.length;
+    return n > 0 && (n-1 > ts.si || ss[n-1].points.length > ts.pi);
+  }
+  function tileT(ts, i, j){ return { scale: ts.S, x: -i*TILE, y: -j*TILE }; }
+  function renderTile(ts, i, j){
+    const S = ts.S;
+    const view = { minX: i*TILE/S, minY: j*TILE/S, maxX: (i+1)*TILE/S, maxY: (j+1)*TILE/S };
+    const t = tileT(ts, i, j);
+    let c = null;
+    for(const s of ts.page.strokes){
+      const b = strokeBBox(s);
+      if(b.maxX < view.minX || b.minX > view.maxX || b.maxY < view.minY || b.minY > view.maxY) continue;
+      if(!c) c = allocTile();
+      drawStroke(c.ctx, s, t, ts.dark);
+    }
+    ts.map.set(i+','+j, c); // null = empty tile, costs no memory
+    return c;
+  }
+  // draw newly added points into the tiles that already exist
+  function flushPending(ts){
+    if(!hasPending(ts)) return;
+    const ss = ts.page.strokes, S = ts.S;
+    for(let n=ts.si; n<ss.length; n++){
+      const s = ss[n], pts = s.points;
+      const from = n === ts.si ? ts.pi : 0;
+      if(from >= pts.length) continue;
+      let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+      for(let k=Math.max(0, from-1); k<pts.length; k++){
+        const p = pts[k];
+        if(p.x<minX)minX=p.x; if(p.x>maxX)maxX=p.x;
+        if(p.y<minY)minY=p.y; if(p.y>maxY)maxY=p.y;
+      }
+      const r = s.width;
+      const i0 = Math.floor((minX-r)*S/TILE), i1 = Math.floor((maxX+r)*S/TILE);
+      const j0 = Math.floor((minY-r)*S/TILE), j1 = Math.floor((maxY+r)*S/TILE);
+      for(let j=j0;j<=j1;j++) for(let i=i0;i<=i1;i++){
+        const key = i+','+j;
+        if(!ts.map.has(key)) continue; // rendered in full when it first becomes visible
+        let c = ts.map.get(key);
+        if(!c){ c = allocTile(); ts.map.set(key, c); }
+        drawStroke(c.ctx, s, tileT(ts, i, j), ts.dark, from);
+      }
+    }
+    syncCursor(ts);
+  }
+  function tileRange(k, ox, oy, pad){
+    const T = TILE*k;
+    return {
+      i0: Math.floor(-ox/T) - pad, i1: Math.floor((canvas.width-1-ox)/T) + pad,
+      j0: Math.floor(-oy/T) - pad, j1: Math.floor((canvas.height-1-oy)/T) + pad
+    };
+  }
+  // returns false if some visible tiles are still missing (time budget exceeded)
+  function drawTiles(ts, k, ox, oy, fill){
+    const T = TILE*k, r = tileRange(k, ox, oy, 0);
+    const oxr = Math.round(ox), oyr = Math.round(oy);
+    const start = performance.now();
+    let done = true, rendered = 0;
+    ctx.imageSmoothingEnabled = k !== 1;
+    for(let j=r.j0;j<=r.j1;j++) for(let i=r.i0;i<=r.i1;i++){
+      let c = ts.map.get(i+','+j);
+      if(c === undefined){
+        if(!fill) continue;
+        if(rendered > 0 && performance.now() - start > TILE_BUDGET_MS){ done = false; continue; }
+        c = renderTile(ts, i, j); rendered++;
+      }
+      if(k === 1){
+        if(fill) ctx.clearRect(oxr+i*TILE, oyr+j*TILE, TILE, TILE);
+        if(c) ctx.drawImage(c.canvas, oxr+i*TILE, oyr+j*TILE);
+      }else if(c){
+        ctx.drawImage(c.canvas, ox+i*T, oy+j*T, T, T);
+      }
+    }
+    return done;
+  }
+  function evictTiles(ts, ox, oy){
+    let count = 0;
+    ts.map.forEach(c=>{ if(c) count++; });
+    if(count <= MAX_TILES) return;
+    const ci = (canvas.width/2 - ox)/TILE, cj = (canvas.height/2 - oy)/TILE;
+    const list = [];
+    ts.map.forEach((c, key)=>{ if(c){ const [i, j] = key.split(',').map(Number); list.push([Math.hypot(i+0.5-ci, j+0.5-cj), key]); } });
+    list.sort((a, b)=>b[0]-a[0]);
+    for(let n=0; n<count-MAX_TILES; n++){
+      const key = list[n][1];
+      const c = ts.map.get(key);
+      if(tilePool.length < 8) tilePool.push(c);
+      ts.map.delete(key);
+    }
+  }
+  // render the ring of tiles just outside the viewport while the user is idle
+  function schedulePrefetch(){
+    if(prefetchQueued) return;
+    prefetchQueued = true;
+    const idle = window.requestIdleCallback || (fn=>setTimeout(()=>fn({ timeRemaining: ()=>8 }), 60));
+    idle(deadline=>{
+      prefetchQueued = false;
+      const ts = tiles, t = currentTransform();
+      if(!ts || ts.page !== currentPage() || Math.abs(ts.S - t.scale*dpr) > 1e-9 || currentStroke) return;
+      flushPending(ts);
+      const r = tileRange(1, t.x*dpr, t.y*dpr, 1);
+      for(let j=r.j0;j<=r.j1;j++) for(let i=r.i0;i<=r.i1;i++){
+        if(ts.map.has(i+','+j)) continue;
+        if(deadline.timeRemaining() < 4){ schedulePrefetch(); return; }
+        renderTile(ts, i, j);
+      }
+    });
+  }
+  function regenerateTiles(){
+    regenTimer = null;
+    if(!tiles || tiles.page !== currentPage()){ render(); return; }
+    releaseTileSet(oldTiles);
+    oldTiles = tiles;
+    tiles = newTileSet();
+    render();
+  }
+
+  function draw(){
+    const page = currentPage(), t = page.transform, S = t.scale*dpr;
+    if(!tiles || tiles.page !== page || tiles.dark !== dark || tiles.dpr !== dpr){
+      clearTimeout(regenTimer); regenTimer = null;
+      releaseTileSet(oldTiles); oldTiles = null;
+      releaseTileSet(tiles); tiles = newTileSet();
+    }
+    const ox = t.x*dpr, oy = t.y*dpr;
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    if(Math.abs(S - tiles.S) > 1e-9){
+      if(hasPending(tiles)){
+        regenerateTiles(); // pen input at a new zoom level: switch right away
+        return;
+      }
+      // zoom gesture in progress: show the scaled bitmap, re-render sharply once it settles
+      drawTiles(tiles, S/tiles.S, ox, oy, false);
+      clearTimeout(regenTimer);
+      regenTimer = setTimeout(regenerateTiles, 160);
+      return;
+    }
+    flushPending(tiles);
+    if(oldTiles) drawTiles(oldTiles, S/oldTiles.S, ox, oy, false);
+    if(drawTiles(tiles, 1, ox, oy, true)){
+      releaseTileSet(oldTiles); oldTiles = null;
+      evictTiles(tiles, ox, oy);
+      schedulePrefetch();
+    }else{
+      render(); // continue filling missing tiles next frame
+    }
   }
 
   let renderQueued = false;
@@ -461,10 +674,7 @@
     renderQueued = true;
     requestAnimationFrame(()=>{
       renderQueued = false;
-      ctx.setTransform(dpr,0,0,dpr,0,0);
-      ctx.clearRect(0,0,canvas.width/dpr, canvas.height/dpr);
-      const t = currentTransform();
-      for(const s of currentPage().strokes) drawStroke(ctx, s, t, dark);
+      draw();
       updateZoomUI();
     });
   }
@@ -522,10 +732,10 @@
     pageDeleteBtn.disabled = pages.length <= 1;
   }
   document.getElementById('page-prev').addEventListener('click', ()=>{
-    if(pageIndex>0){ pageIndex--; refreshPageLabel(); render(); markDirty(); }
+    if(pageIndex>0){ pageIndex--; refreshPageLabel(); render(); markViewDirty(); }
   });
   document.getElementById('page-next').addEventListener('click', ()=>{
-    if(pageIndex<pages.length-1){ pageIndex++; refreshPageLabel(); render(); markDirty(); }
+    if(pageIndex<pages.length-1){ pageIndex++; refreshPageLabel(); render(); markViewDirty(); }
   });
   document.getElementById('page-add').addEventListener('click', ()=>{
     pages.splice(pageIndex+1, 0, newPage());
@@ -644,7 +854,7 @@
         t.x = mid1.x - worldMid.x*newScale;
         t.y = mid1.y - worldMid.y*newScale;
       }
-      markDirty();
+      markViewDirty();
       render();
       return;
     }
@@ -653,7 +863,7 @@
       const t = currentTransform();
       t.x = mousePan.start.x + (pos.x - mousePan.startX);
       t.y = mousePan.start.y + (pos.y - mousePan.startY);
-      markDirty();
+      markViewDirty();
       render();
       return;
     }
@@ -687,7 +897,7 @@
     if(zoomLocked){
       if(e.ctrlKey) return; // trackpad pinch
       t.x -= e.deltaX; t.y -= e.deltaY;
-      markDirty(); render();
+      markViewDirty(); render();
       return;
     }
     const worldBefore = screenToWorld(pos.x, pos.y, t);
@@ -696,7 +906,7 @@
     t.scale = newScale;
     t.x = pos.x - worldBefore.x*newScale;
     t.y = pos.y - worldBefore.y*newScale;
-    markDirty();
+    markViewDirty();
     render();
   }, { passive:false });
 
@@ -724,7 +934,7 @@
     t.scale = clamp(newScale, MIN_SCALE, MAX_SCALE);
     t.x = cx - w.x*t.scale;
     t.y = cy - w.y*t.scale;
-    markDirty(); render();
+    markViewDirty(); render();
   }
   function zoomToFit(){
     const page = currentPage();
@@ -736,7 +946,7 @@
     t.scale = clamp(Math.min(availW/(bb.maxX-bb.minX), availH/(bb.maxY-bb.minY)), MIN_SCALE, MAX_SCALE);
     t.x = window.innerWidth/2 - (bb.minX+bb.maxX)/2*t.scale;
     t.y = top + availH/2 - (bb.minY+bb.maxY)/2*t.scale;
-    markDirty(); render();
+    markViewDirty(); render();
   }
   zoomSelect.addEventListener('change', ()=>{
     const v = zoomSelect.value;
@@ -991,7 +1201,7 @@
     const b = binders[i];
     binders[binderIndex].pageIndex = pageIndex;
     const wasCurrent = (i === binderIndex);
-    deleted.add(b.id); dirty.delete(b.id); fileDirty.delete(b.id);
+    deleted.add(b.id); dirty.delete(b.id); viewDirty.delete(b.id); fileDirty.delete(b.id);
     binders.splice(i, 1);
     if(binders.length === 0){ const nb = newBinder(); binders.push(nb); markDirty(nb); binderIndex = 0; loadBinder(); }
     else if(wasCurrent){ binderIndex = Math.min(i, binders.length-1); loadBinder(); }
@@ -1238,7 +1448,7 @@
 
   // ---------- persistence (IndexedDB) ----------
   let db = null, loaded = false, saveTimer = null;
-  const dirty = new Set(), deleted = new Set();
+  const dirty = new Set(), deleted = new Set(), viewDirty = new Set();
 
   function reqP(r){
     return new Promise((res, rej)=>{ r.onsuccess = ()=>res(r.result); r.onerror = ()=>rej(r.error); });
@@ -1258,6 +1468,12 @@
     });
   }
 
+  // pan/zoom/page turn: persist later, never triggers a file write
+  function markViewDirty(){
+    viewDirty.add(binders[binderIndex].id);
+    lastInputAt = performance.now();
+    scheduleSave();
+  }
   function markDirty(b){
     const target = b || binders[binderIndex];
     if(target){ dirty.add(target.id); fileDirty.add(target.id); }
@@ -1268,9 +1484,16 @@
     if(!loaded || saveTimer) return;
     saveTimer = setTimeout(persistNow, 1500);
   }
-  function persistNow(){
+  // Writing to IndexedDB clones the whole binder, so wait until the user pauses
+  // (unless force === true, e.g. when the page is being hidden).
+  function persistNow(force){
     if(!db || !loaded) return;
     clearTimeout(saveTimer); saveTimer = null;
+    if(force !== true && (currentStroke || gestureStart || mousePan || performance.now() - lastInputAt < 1200)){
+      saveTimer = setTimeout(persistNow, 1000);
+      return;
+    }
+    viewDirty.forEach(id=>dirty.add(id)); viewDirty.clear();
     try{
       binders[binderIndex].pageIndex = pageIndex;
       const tx = db.transaction(['binders', 'meta'], 'readwrite');
@@ -1327,8 +1550,8 @@
     return valid.length > 0;
   }
 
-  document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState === 'hidden'){ persistNow(); flushFiles(true); } });
-  window.addEventListener('pagehide', persistNow);
+  document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState === 'hidden'){ persistNow(true); flushFiles(true); } });
+  window.addEventListener('pagehide', ()=>persistNow(true));
 
   // ---------- init ----------
   (async function init(){
@@ -1344,7 +1567,7 @@
     }
     loadBinder();
     resize();
-    if(loaded){ persistNow(); await restoreFolder(); }
+    if(loaded){ persistNow(true); await restoreFolder(); }
   })();
 })();
 </script>
