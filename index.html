@@ -122,12 +122,13 @@
   }
   .swatch.active{ border-color: var(--ink); box-shadow: 0 0 0 2px var(--toolbar-bg) inset; }
   .swatch[data-color="ink"]{ background: var(--ink); }
-  .swatch[data-color="red"]{ background: #e5302a; }
-  .swatch[data-color="yellow"]{ background: #f2b600; }
-  .swatch[data-color="blue"]{ background: #1e6fe0; }
-  html.dark .swatch[data-color="red"]{ background: #ff5a52; }
-  html.dark .swatch[data-color="yellow"]{ background: #ffd93d; }
-  html.dark .swatch[data-color="blue"]{ background: #5aa2ff; }
+  .swatch[data-color="orange"]{ background: #E69F00; }
+  .swatch[data-color="sky"]{ background: #56B4E9; }
+  .swatch[data-color="green"]{ background: #009E73; }
+  .swatch[data-color="yellow"]{ background: #F0E442; }
+  .swatch[data-color="blue"]{ background: #0072B2; }
+  .swatch[data-color="red"]{ background: #D55E00; }
+  .swatch[data-color="purple"]{ background: #CC79A7; }
   .divider{
     width:1px; height:22px; background: var(--divider); margin:0 4px; flex-shrink:0;
   }
@@ -313,9 +314,13 @@
     <div class="divider"></div>
     <div class="grp">
       <button class="swatch active" data-color="ink" title="黒/白"></button>
-      <button class="swatch" data-color="red" title="赤"></button>
+      <button class="swatch" data-color="orange" title="オレンジ"></button>
+      <button class="swatch" data-color="sky" title="スカイブルー"></button>
+      <button class="swatch" data-color="green" title="ブルーイッシュグリーン"></button>
       <button class="swatch" data-color="yellow" title="黄色"></button>
       <button class="swatch" data-color="blue" title="青"></button>
+      <button class="swatch" data-color="red" title="朱色"></button>
+      <button class="swatch" data-color="purple" title="赤紫"></button>
     </div>
     <div class="divider"></div>
     <div class="grp">
@@ -436,10 +441,10 @@
 
   function currentPage(){ return pages[pageIndex]; }
   function currentTransform(){ return currentPage().transform; }
+  // Okabe-Ito palette (color-blind safe); same in light and dark mode, only ink flips
+  const PALETTE = {orange:'#E69F00', sky:'#56B4E9', green:'#009E73', yellow:'#F0E442', blue:'#0072B2', red:'#D55E00', purple:'#CC79A7'};
   function colorFor(key, dk){
-    if(key === 'red') return dk ? '#ff5a52' : '#e5302a';
-    if(key === 'yellow') return dk ? '#ffd93d' : '#f2b600';
-    if(key === 'blue') return dk ? '#5aa2ff' : '#1e6fe0';
+    if(PALETTE[key]) return PALETTE[key];
     return dk ? '#f2f2f2' : '#141414';
   }
 
@@ -1335,7 +1340,7 @@
       const strokes = Array.isArray(pg && pg.strokes) ? pg.strokes : [];
       page.strokes = strokes.map(s=>({
         tool: s && s.tool === 'eraser' ? 'eraser' : 'pencil',
-        color: s && (s.color === 'red' || s.color === 'yellow' || s.color === 'blue') ? s.color : 'ink',
+        color: s && PALETTE[s.color] ? s.color : 'ink',
         width: clamp(Number(s && s.width) || 3, 1, 80),
         points: (Array.isArray(s && s.points) ? s.points : [])
           .filter(p=>p && Number.isFinite(p.x) && Number.isFinite(p.y))
@@ -1732,7 +1737,7 @@
         widths.pencil = clamp(Number(meta.widths.pencil) || 3, 1, 20);
         widths.eraser = clamp(Number(meta.widths.eraser) || 20, 4, 80);
       }
-      if(['ink','red','yellow','blue'].includes(meta.penColor)) setPenColor(meta.penColor);
+      if(meta.penColor === 'ink' || PALETTE[meta.penColor]) setPenColor(meta.penColor);
       setTool(meta.tool === 'eraser' ? 'eraser' : 'pencil');
       setZoomLocked(meta.zoomLocked === true);
       setPanLocked(meta.panLocked === true);
