@@ -356,7 +356,7 @@
 </div>
 
 <div id="hint">
-  ペン/マウスで描く。Ctrl/⌘+Zで元に戻す。指1本でパン、2本でパン&ズーム。マウスホイールでもズームできます。矢印ボタンでパン、鍵ボタンでズームを固定できます。
+  ペン/マウスで描く。Ctrl/⌘+Zで元に戻す。指2本でパン&ズーム。マウスホイールでもズームできます。矢印ボタンでパン、鍵ボタンでズームを固定できます。
 </div>
 
 <!-- binder screen -->
@@ -997,16 +997,10 @@
       touchPointers.set(e.pointerId, rectPos(e));
       const ids = [...gestureStart.pointers.keys()];
       const t = currentTransform();
-      if(ids.length === 1){
-        if(panLocked) return;
-        const id0 = ids[0];
-        const p0 = gestureStart.pointers.get(id0);
-        const p1 = touchPointers.get(id0);
-        if(!p1) return;
-        t.x = gestureStart.transform.x + (p1.x - p0.x);
-        t.y = gestureStart.transform.y + (p1.y - p0.y);
-        t.scale = gestureStart.transform.scale;
-      } else if(ids.length >= 2){
+      // one finger does nothing (avoids accidental scrolling, e.g. a resting hand);
+      // two fingers pan and pinch-zoom
+      if(ids.length < 2) return;
+      {
         const [idA, idB] = ids;
         const a0 = gestureStart.pointers.get(idA), b0 = gestureStart.pointers.get(idB);
         const a1 = touchPointers.get(idA), b1 = touchPointers.get(idB);
