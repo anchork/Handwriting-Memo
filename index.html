@@ -181,6 +181,14 @@
   #folder-dot.needs-permission{ display:block; background:#f2a600; }
   #folder-row{ margin:-6px 0 18px; font-size:12.5px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   #folder-row[hidden]{ display:none; }
+  #eraser-cursor{
+    position:fixed; left:0; top:0; z-index:5;
+    border-radius:50%; pointer-events:none; display:none;
+    border:1px solid rgba(0,0,0,0.75);
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.85), inset 0 0 0 1px rgba(255,255,255,0.85);
+    will-change: transform;
+  }
+  #canvas.eraser-hover{ cursor:none; }
   #toast{
     position:fixed; bottom: calc(24px + env(safe-area-inset-bottom)); left:50%; transform:translateX(-50%);
     background: var(--btn-active-bg); color: var(--btn-active-fg);
@@ -370,6 +378,7 @@
   <input type="file" id="import-file" accept=".html,.htm,.json,text/html,application/json" multiple hidden>
 </div>
 
+<div id="eraser-cursor"></div>
 <div id="toast"></div>
 
 <script>
@@ -697,6 +706,7 @@
       draw();
       updateZoomUI();
       updateHistoryButtons();
+      placeEraserCursor(); // follows zoom changes
     });
   }
 
@@ -721,6 +731,32 @@
   const pencilBtn = document.getElementById('tool-pencil');
   const eraserBtn = document.getElementById('tool-eraser');
   const thickness = document.getElementById('thickness');
+  // ---------- eraser outline (mouse / pen hover) ----------
+  // An HTML overlay moved with a CSS transform, so it never redraws the canvas.
+  const eraserCursor = document.getElementById('eraser-cursor');
+  const eraserHover = { visible:false, x:0, y:0, p:0.5 };
+  function placeEraserCursor(){
+    if(!eraserHover.visible || tool !== 'eraser'){
+      eraserCursor.style.display = 'none';
+      canvas.classList.remove('eraser-hover');
+      return;
+    }
+    // same diameter the eraser stroke uses: width * zoom * pressure factor
+    const d = Math.max(widths.eraser * currentTransform().scale * (0.5 + 0.5*eraserHover.p), 4);
+    eraserCursor.style.display = 'block';
+    eraserCursor.style.width = eraserCursor.style.height = d + 'px';
+    eraserCursor.style.transform = 'translate(' + (eraserHover.x - d/2) + 'px,' + (eraserHover.y - d/2) + 'px)';
+    canvas.classList.add('eraser-hover');
+  }
+  function trackEraserCursor(e){
+    if(e.pointerType === 'touch') return;
+    eraserHover.visible = true;
+    eraserHover.x = e.clientX; eraserHover.y = e.clientY;
+    eraserHover.p = e.pressure > 0 ? e.pressure : 0.5; // hovering reports 0
+    placeEraserCursor();
+  }
+  function hideEraserCursor(){ eraserHover.visible = false; placeEraserCursor(); }
+
   function setTool(t){
     tool = t;
     pencilBtn.classList.toggle('active', t==='pencil');
@@ -728,6 +764,7 @@
     thickness.min = t==='pencil' ? 1 : 4;
     thickness.max = t==='pencil' ? 20 : 80;
     thickness.value = widths[t];
+    placeEraserCursor();
   }
   pencilBtn.addEventListener('click', ()=>{ setTool('pencil'); scheduleSave(); });
   eraserBtn.addEventListener('click', ()=>{ setTool('eraser'); scheduleSave(); });
@@ -891,6 +928,7 @@
   canvas.addEventListener('contextmenu', e=>e.preventDefault());
 
   canvas.addEventListener('pointerdown', e=>{
+    trackEraserCursor(e);
     dismissHint();
     canvas.setPointerCapture(e.pointerId);
 
@@ -918,6 +956,7 @@
   });
 
   canvas.addEventListener('pointermove', e=>{
+    trackEraserCursor(e);
     if(e.pointerType === 'touch'){
       if(!touchPointers.has(e.pointerId) || !gestureStart) return;
       touchPointers.set(e.pointerId, rectPos(e));
@@ -983,7 +1022,7 @@
   }
   canvas.addEventListener('pointerup', endPointer);
   canvas.addEventListener('pointercancel', endPointer);
-  canvas.addEventListener('pointerleave', e=>{ if(e.pointerType!=='touch') endPointer(e); });
+  canvas.addEventListener('pointerleave', e=>{ if(e.pointerType!=='touch'){ endPointer(e); hideEraserCursor(); } });
 
   canvas.addEventListener('wheel', e=>{
     e.preventDefault();
@@ -1279,6 +1318,7 @@
   const binderLabel = document.getElementById('binder-label');
 
   function openBinderScreen(){
+    hideEraserCursor();
     resetInputState();
     renderBinderScreen();
     binderScreen.classList.add('open');
