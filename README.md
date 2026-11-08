@@ -1,5 +1,4 @@
 # 手書きメモ (PWA)
-https://anchork.github.io/Handwriting-Memo/
 
 鉛筆と消しゴムだけのシンプルな手書きメモ。無限キャンバス、バインダー、PDF保存に対応。
 

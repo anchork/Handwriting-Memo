@@ -115,8 +115,10 @@
   .swatch[data-color="ink"]{ background: var(--ink); }
   .swatch[data-color="red"]{ background: #e5302a; }
   .swatch[data-color="yellow"]{ background: #f2b600; }
+  .swatch[data-color="blue"]{ background: #1e6fe0; }
   html.dark .swatch[data-color="red"]{ background: #ff5a52; }
   html.dark .swatch[data-color="yellow"]{ background: #ffd93d; }
+  html.dark .swatch[data-color="blue"]{ background: #5aa2ff; }
   .divider{
     width:1px; height:22px; background: var(--divider); margin:0 4px; flex-shrink:0;
   }
@@ -257,6 +259,7 @@
   <button class="swatch active" data-color="ink" title="黒/白"></button>
   <button class="swatch" data-color="red" title="赤"></button>
   <button class="swatch" data-color="yellow" title="黄色"></button>
+  <button class="swatch" data-color="blue" title="青"></button>
   <div class="divider"></div>
   <input type="range" id="thickness" min="1" max="20" value="3" step="1">
   <div class="divider"></div>
@@ -357,6 +360,7 @@
   function colorFor(key, dk){
     if(key === 'red') return dk ? '#ff5a52' : '#e5302a';
     if(key === 'yellow') return dk ? '#ffd93d' : '#f2b600';
+    if(key === 'blue') return dk ? '#5aa2ff' : '#1e6fe0';
     return dk ? '#f2f2f2' : '#141414';
   }
 
@@ -744,7 +748,7 @@
       const strokes = Array.isArray(pg && pg.strokes) ? pg.strokes : [];
       page.strokes = strokes.map(s=>({
         tool: s && s.tool === 'eraser' ? 'eraser' : 'pencil',
-        color: s && (s.color === 'red' || s.color === 'yellow') ? s.color : 'ink',
+        color: s && (s.color === 'red' || s.color === 'yellow' || s.color === 'blue') ? s.color : 'ink',
         width: clamp(Number(s && s.width) || 3, 1, 80),
         points: (Array.isArray(s && s.points) ? s.points : [])
           .filter(p=>p && Number.isFinite(p.x) && Number.isFinite(p.y))
@@ -1043,7 +1047,7 @@
         widths.pencil = clamp(Number(meta.widths.pencil) || 3, 1, 20);
         widths.eraser = clamp(Number(meta.widths.eraser) || 20, 4, 80);
       }
-      if(meta.penColor === 'red' || meta.penColor === 'yellow' || meta.penColor === 'ink') setPenColor(meta.penColor);
+      if(['ink','red','yellow','blue'].includes(meta.penColor)) setPenColor(meta.penColor);
       setTool(meta.tool === 'eraser' ? 'eraser' : 'pencil');
     }
     return valid.length > 0;
