@@ -87,7 +87,7 @@
   }
   #main-bar::-webkit-scrollbar{ display:none; }
   #top-bar{ grid-area:right; justify-self:end; }
-  @media (max-width: 1000px){
+  @media (max-width: 1100px){
     #top-row{
       grid-template-columns: 1fr 1fr;
       grid-template-areas: "left right" "main main";
@@ -141,6 +141,15 @@
     width:84px; accent-color: var(--ink);
     margin: 0 6px;
   }
+  #zoom-select{
+    height:32px; padding:0 6px; margin:0 2px;
+    border:1px solid var(--divider); border-radius:8px;
+    background:transparent; color:var(--ink);
+    font-family:inherit; font-size:13px; font-variant-numeric: tabular-nums;
+    cursor:pointer; flex-shrink:0;
+  }
+  #zoom-select option{ background: var(--bg); color: var(--ink); }
+  #zoom-select:disabled{ opacity:0.45; cursor:default; }
   #page-label{
     min-width:44px; text-align:center;
     font-size:13px; color:var(--ink);
@@ -279,6 +288,22 @@
     <div class="divider"></div>
     <input type="range" id="thickness" min="1" max="20" value="3" step="1">
     <div class="divider"></div>
+    <select id="zoom-select" title="ズーム倍率">
+      <option value="custom" id="zoom-custom" hidden></option>
+      <option value="0.25">25%</option>
+      <option value="0.5">50%</option>
+      <option value="0.75">75%</option>
+      <option value="1">100%</option>
+      <option value="1.5">150%</option>
+      <option value="2">200%</option>
+      <option value="3">300%</option>
+      <option value="4">400%</option>
+      <option value="fit">全体を表示</option>
+    </select>
+    <button class="btn" id="zoom-lock" title="ズームをロック" aria-pressed="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path id="zoom-lock-shackle" d="M8 11V7a4 4 0 0 1 7.5-2"/></svg>
+    </button>
+    <div class="divider"></div>
     <button class="btn" id="page-prev" title="前のページ">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
     </button>
@@ -309,7 +334,7 @@
 </div>
 
 <div id="hint">
-  ペン/マウスで描く。指1本でパン、2本でパン&ズーム。マウスホイールでもズームできます。
+  ペン/マウスで描く。指1本でパン、2本でパン&ズーム。マウスホイールでもズームできます。鍵ボタンでズームを固定できます。
 </div>
 
 <!-- binder screen -->
@@ -440,6 +465,7 @@
       ctx.clearRect(0,0,canvas.width/dpr, canvas.height/dpr);
       const t = currentTransform();
       for(const s of currentPage().strokes) drawStroke(ctx, s, t, dark);
+      updateZoomUI();
     });
   }
 
@@ -611,7 +637,8 @@
         const dist1 = Math.hypot(b1.x-a1.x, b1.y-a1.y);
         const mid0 = { x:(a0.x+b0.x)/2, y:(a0.y+b0.y)/2 };
         const mid1 = { x:(a1.x+b1.x)/2, y:(a1.y+b1.y)/2 };
-        const newScale = clamp(gestureStart.transform.scale * (dist1/Math.max(dist0,1e-6)), MIN_SCALE, MAX_SCALE);
+        const newScale = zoomLocked ? gestureStart.transform.scale
+          : clamp(gestureStart.transform.scale * (dist1/Math.max(dist0,1e-6)), MIN_SCALE, MAX_SCALE);
         const worldMid = screenToWorld(mid0.x, mid0.y, gestureStart.transform);
         t.scale = newScale;
         t.x = mid1.x - worldMid.x*newScale;
@@ -657,6 +684,12 @@
     dismissHint();
     const pos = rectPos(e);
     const t = currentTransform();
+    if(zoomLocked){
+      if(e.ctrlKey) return; // trackpad pinch
+      t.x -= e.deltaX; t.y -= e.deltaY;
+      markDirty(); render();
+      return;
+    }
     const worldBefore = screenToWorld(pos.x, pos.y, t);
     const factor = Math.pow(1.0016, -e.deltaY);
     const newScale = clamp(t.scale*factor, MIN_SCALE, MAX_SCALE);
@@ -666,6 +699,64 @@
     markDirty();
     render();
   }, { passive:false });
+
+  // ---------- zoom select + lock ----------
+  const zoomSelect = document.getElementById('zoom-select');
+  const zoomCustom = document.getElementById('zoom-custom');
+  const zoomLockBtn = document.getElementById('zoom-lock');
+  let zoomLocked = false;
+
+  function updateZoomUI(){
+    const sc = currentTransform().scale;
+    const preset = [...zoomSelect.options].find(o=>o !== zoomCustom && Math.abs(Number(o.value) - sc) < 0.005);
+    if(preset){ zoomCustom.hidden = true; zoomSelect.value = preset.value; }
+    else{
+      zoomCustom.textContent = Math.round(sc*100) + '%';
+      zoomCustom.hidden = false;
+      zoomSelect.value = 'custom';
+    }
+  }
+  // zoom keeping the given screen point (default: screen center) fixed
+  function setZoom(newScale, cx, cy){
+    const t = currentTransform();
+    if(cx === undefined){ cx = window.innerWidth/2; cy = window.innerHeight/2; }
+    const w = screenToWorld(cx, cy, t);
+    t.scale = clamp(newScale, MIN_SCALE, MAX_SCALE);
+    t.x = cx - w.x*t.scale;
+    t.y = cy - w.y*t.scale;
+    markDirty(); render();
+  }
+  function zoomToFit(){
+    const page = currentPage();
+    if(!page.strokes.length){ setZoom(1); return; }
+    const bb = boundingBox(page);
+    const top = document.getElementById('top-row').getBoundingClientRect().bottom + 8;
+    const availW = window.innerWidth - 32, availH = window.innerHeight - top - 16;
+    const t = currentTransform();
+    t.scale = clamp(Math.min(availW/(bb.maxX-bb.minX), availH/(bb.maxY-bb.minY)), MIN_SCALE, MAX_SCALE);
+    t.x = window.innerWidth/2 - (bb.minX+bb.maxX)/2*t.scale;
+    t.y = top + availH/2 - (bb.minY+bb.maxY)/2*t.scale;
+    markDirty(); render();
+  }
+  zoomSelect.addEventListener('change', ()=>{
+    const v = zoomSelect.value;
+    if(v === 'fit') zoomToFit();
+    else if(v !== 'custom') setZoom(Number(v));
+    zoomSelect.blur();
+  });
+  function setZoomLocked(on){
+    zoomLocked = on;
+    zoomLockBtn.classList.toggle('active', on);
+    zoomLockBtn.setAttribute('aria-pressed', String(on));
+    zoomLockBtn.title = on ? 'ズームのロックを解除' : 'ズームをロック';
+    document.getElementById('zoom-lock-shackle').setAttribute('d', on ? 'M8 11V7a4 4 0 0 1 8 0v4' : 'M8 11V7a4 4 0 0 1 7.5-2');
+    zoomSelect.disabled = on;
+  }
+  zoomLockBtn.addEventListener('click', ()=>{
+    setZoomLocked(!zoomLocked);
+    toast(zoomLocked ? 'ズームをロックしました' : 'ズームのロックを解除しました');
+    scheduleSave();
+  });
 
   // ---------- PDF export ----------
   function ensureJsPdf(){
@@ -1187,7 +1278,7 @@
       dirty.forEach(id=>{ const b = binders.find(x=>x.id === id); if(b) bs.put(b); });
       deleted.forEach(id=>bs.delete(id));
       tx.objectStore('meta').put({
-        order: binders.map(b=>b.id), binderIndex, darkOverride, tool, widths: { ...widths }, penColor
+        order: binders.map(b=>b.id), binderIndex, darkOverride, tool, widths: { ...widths }, penColor, zoomLocked
       }, 'meta');
       dirty.clear(); deleted.clear();
       tx.onabort = ()=>{
@@ -1231,6 +1322,7 @@
       }
       if(['ink','red','yellow','blue'].includes(meta.penColor)) setPenColor(meta.penColor);
       setTool(meta.tool === 'eraser' ? 'eraser' : 'pencil');
+      setZoomLocked(meta.zoomLocked === true);
     }
     return valid.length > 0;
   }
