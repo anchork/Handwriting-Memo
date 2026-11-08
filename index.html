@@ -87,7 +87,7 @@
   }
   #main-bar::-webkit-scrollbar{ display:none; }
   #top-bar{ grid-area:right; justify-self:end; }
-  @media (max-width: 1100px){
+  @media (max-width: 1240px){
     #top-row{
       grid-template-columns: 1fr 1fr;
       grid-template-areas: "left right" "main main";
@@ -281,6 +281,16 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20H8l-6-6a2 2 0 0 1 0-2.8l9.2-9.2a2 2 0 0 1 2.8 0l6.8 6.8a2 2 0 0 1 0 2.8L13 20"/><path d="M7 13.5 14.5 6"/></svg>
     </button>
     <div class="divider"></div>
+    <button class="btn" id="undo" title="元に戻す (Ctrl/⌘+Z)" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+    </button>
+    <button class="btn" id="redo" title="やり直す (Ctrl/⌘+Shift+Z)" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>
+    </button>
+    <button class="btn" id="page-clear" title="このページをクリア">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5"/><path d="m9.5 12.5 5 5M14.5 12.5l-5 5"/></svg>
+    </button>
+    <div class="divider"></div>
     <button class="swatch active" data-color="ink" title="黒/白"></button>
     <button class="swatch" data-color="red" title="赤"></button>
     <button class="swatch" data-color="yellow" title="黄色"></button>
@@ -337,7 +347,7 @@
 </div>
 
 <div id="hint">
-  ペン/マウスで描く。指1本でパン、2本でパン&ズーム。マウスホイールでもズームできます。矢印ボタンでパン、鍵ボタンでズームを固定できます。
+  ペン/マウスで描く。Ctrl/⌘+Zで元に戻す。指1本でパン、2本でパン&ズーム。マウスホイールでもズームできます。矢印ボタンでパン、鍵ボタンでズームを固定できます。
 </div>
 
 <!-- binder screen -->
@@ -630,6 +640,13 @@
       }
     });
   }
+  // strokes were removed or replaced (undo / clear): re-render from the vector data
+  function invalidateTiles(){
+    clearTimeout(regenTimer); regenTimer = null;
+    releaseTileSet(oldTiles); oldTiles = null;
+    releaseTileSet(tiles); tiles = null;
+    render();
+  }
   function regenerateTiles(){
     regenTimer = null;
     if(!tiles || tiles.page !== currentPage()){ render(); return; }
@@ -679,6 +696,7 @@
       renderQueued = false;
       draw();
       updateZoomUI();
+      updateHistoryButtons();
     });
   }
 
@@ -725,6 +743,69 @@
       setTool('pencil');
       scheduleSave();
     });
+  });
+
+  // ---------- undo / redo / clear (per page, kept in memory for this session) ----------
+  const HISTORY_LIMIT = 300;
+  const histories = new WeakMap();
+  function historyOf(page){
+    let h = histories.get(page);
+    if(!h){ h = { undo: [], redo: [] }; histories.set(page, h); }
+    return h;
+  }
+  function pushHistory(entry){
+    const h = historyOf(currentPage());
+    h.undo.push(entry);
+    if(h.undo.length > HISTORY_LIMIT) h.undo.shift();
+    h.redo.length = 0;
+  }
+  const undoBtn = document.getElementById('undo');
+  const redoBtn = document.getElementById('redo');
+  const clearBtn = document.getElementById('page-clear');
+  function updateHistoryButtons(){
+    const h = historyOf(currentPage());
+    undoBtn.disabled = h.undo.length === 0;
+    redoBtn.disabled = h.redo.length === 0;
+    clearBtn.disabled = currentPage().strokes.length === 0;
+  }
+  function undo(){
+    if(currentStroke) return;
+    const page = currentPage(), h = historyOf(page);
+    const e = h.undo.pop();
+    if(!e) return;
+    if(e.type === 'add'){
+      const i = page.strokes.lastIndexOf(e.stroke);
+      if(i >= 0) page.strokes.splice(i, 1);
+    }else if(e.type === 'clear'){
+      page.strokes = e.strokes;
+    }
+    h.redo.push(e);
+    invalidateTiles(); markDirty();
+  }
+  function redo(){
+    if(currentStroke) return;
+    const page = currentPage(), h = historyOf(page);
+    const e = h.redo.pop();
+    if(!e) return;
+    if(e.type === 'add'){
+      page.strokes.push(e.stroke); // appended: the tile cache draws it incrementally
+      render();
+    }else if(e.type === 'clear'){
+      page.strokes = [];
+      invalidateTiles();
+    }
+    h.undo.push(e);
+    markDirty();
+  }
+  undoBtn.addEventListener('click', undo);
+  redoBtn.addEventListener('click', redo);
+  clearBtn.addEventListener('click', ()=>{
+    const page = currentPage();
+    if(currentStroke || page.strokes.length === 0) return;
+    pushHistory({ type:'clear', strokes: page.strokes });
+    page.strokes = [];
+    invalidateTiles(); markDirty();
+    toast('ページをクリアしました(元に戻すで復元できます)', 2600);
   });
 
   // ---------- pages ----------
@@ -780,6 +861,12 @@
   window.addEventListener('keydown', e=>{
     if(e.code==='Space' && !(e.target && e.target.tagName==='INPUT')) spacePressed = true;
     if(e.code==='Escape') closeBinderScreen();
+    const typing = e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT');
+    if((e.ctrlKey || e.metaKey) && !typing && !binderScreen.classList.contains('open')){
+      const k = e.key.toLowerCase();
+      if(k === 'z' && !e.shiftKey){ e.preventDefault(); undo(); }
+      else if((k === 'z' && e.shiftKey) || k === 'y'){ e.preventDefault(); redo(); }
+    }
   });
   window.addEventListener('keyup', e=>{ if(e.code==='Space') spacePressed = false; });
 
@@ -824,7 +911,9 @@
     const pos = rectPos(e);
     const w = screenToWorld(pos.x, pos.y, currentTransform());
     currentStroke = { tool: tool, color: penColor, width: widths[tool], points: [{ x:w.x, y:w.y, p: e.pressure || 0.5 }] };
-    currentPage().strokes.push(currentStroke); markDirty();
+    currentPage().strokes.push(currentStroke);
+    pushHistory({ type:'add', stroke: currentStroke });
+    markDirty();
     render();
   });
 
