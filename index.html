@@ -465,6 +465,11 @@
   //  - new pen input is drawn incrementally onto the cache
   //  - zooming shows the scaled bitmap and re-rasterizes once the gesture pauses
   const strokeBoxes = new WeakMap();
+  // Eraser grows with speed (like MS Whiteboard): each eraser point may carry g (growth factor, 1..ERASER_MAX_GROW)
+  const ERASER_MAX_GROW = 4;
+  const ERASER_SLOW = 0.5, ERASER_FAST = 2.5; // screen px/ms: no growth below SLOW, full growth at FAST
+  function pointWidth(s, p){ return s.width*(0.5+0.5*(p.p ?? 0.5))*(p.g || 1); }
+  function strokePad(s){ return s.tool === 'eraser' ? s.width*ERASER_MAX_GROW/2 + 1 : s.width; }
   function strokeBBox(s){
     const c = strokeBoxes.get(s);
     if(c && c.n === s.points.length) return c;
@@ -473,7 +478,7 @@
       if(p.x<minX)minX=p.x; if(p.x>maxX)maxX=p.x;
       if(p.y<minY)minY=p.y; if(p.y>maxY)maxY=p.y;
     }
-    const r = s.width;
+    const r = strokePad(s);
     const box = { n: s.points.length, minX:minX-r, minY:minY-r, maxX:maxX+r, maxY:maxY+r };
     strokeBoxes.set(s, box);
     return box;
@@ -499,14 +504,14 @@
     if(pts.length === 1){
       if(!from){
         const p = pts[0];
-        const r = Math.max((stroke.width*sc*(0.5+0.5*(p.p ?? 0.5)))/2, 0.5);
+        const r = Math.max(pointWidth(stroke, p)*sc/2, 0.5);
         g.beginPath(); g.arc(p.x*sc+tx, p.y*sc+ty, r, 0, Math.PI*2); g.fill();
       }
     }else{
       // one path per run of equal (quantized) width instead of one per segment
       let cur = -1, open = false;
       for(let i=Math.max(1, from || 0); i<pts.length; i++){
-        const w = Math.max(Math.round(stroke.width*sc*(0.5+0.5*(pts[i].p ?? 0.5))*4)/4, 0.5);
+        const w = Math.max(Math.round(pointWidth(stroke, pts[i])*sc*4)/4, 0.5);
         if(w !== cur){
           if(open) g.stroke();
           cur = w; g.lineWidth = w;
@@ -585,7 +590,7 @@
         if(p.x<minX)minX=p.x; if(p.x>maxX)maxX=p.x;
         if(p.y<minY)minY=p.y; if(p.y>maxY)maxY=p.y;
       }
-      const r = s.width;
+      const r = strokePad(s);
       const i0 = Math.floor((minX-r)*S/TILE), i1 = Math.floor((maxX+r)*S/TILE);
       const j0 = Math.floor((minY-r)*S/TILE), j1 = Math.floor((maxY+r)*S/TILE);
       for(let j=j0;j<=j1;j++) for(let i=i0;i<=i1;i++){
@@ -746,7 +751,7 @@
   // ---------- eraser outline (mouse / pen hover) ----------
   // An HTML overlay moved with a CSS transform, so it never redraws the canvas.
   const eraserCursor = document.getElementById('eraser-cursor');
-  const eraserHover = { visible:false, x:0, y:0, p:0.5, forced:false };
+  const eraserHover = { visible:false, x:0, y:0, p:0.5, g:1, forced:false };
   function placeEraserCursor(){
     const erasing = tool === 'eraser' || eraserHover.forced;
     pencilBtn.classList.toggle('active', !erasing);
@@ -757,7 +762,7 @@
       return;
     }
     // same diameter the eraser stroke uses: width * zoom * pressure factor
-    const d = Math.max(widths.eraser * currentTransform().scale * (0.5 + 0.5*eraserHover.p), 4);
+    const d = Math.max(widths.eraser * currentTransform().scale * (0.5 + 0.5*eraserHover.p) * eraserHover.g, 4);
     eraserCursor.style.display = 'block';
     eraserCursor.style.width = eraserCursor.style.height = d + 'px';
     eraserCursor.style.transform = 'translate(' + (eraserHover.x - d/2) + 'px,' + (eraserHover.y - d/2) + 'px)';
@@ -769,6 +774,7 @@
     eraserHover.x = e.clientX; eraserHover.y = e.clientY;
     eraserHover.p = e.pressure > 0 ? e.pressure : 0.5; // hovering reports 0
     eraserHover.forced = e.pointerType === 'pen' && (e.buttons & (2 | 32)) !== 0;
+    eraserHover.g = currentStroke && currentStroke.tool === 'eraser' ? eraserGrow.g : 1;
     placeEraserCursor();
   }
   function hideEraserCursor(){ eraserHover.visible = false; eraserHover.forced = false; placeEraserCursor(); }
@@ -975,12 +981,24 @@
     // eraser end: some platforms also report bit 32 while hovering, so require pressure
     return e.pointerType === 'pen' && (e.buttons & 32) !== 0 && e.pressure > 0;
   }
+  // smoothed screen-space speed -> growth factor; grows quickly, shrinks back gently
+  const eraserGrow = { x:0, y:0, t:0, v:0, g:1 };
+  function updateEraserGrow(e){
+    const dt = Math.max(e.timeStamp - eraserGrow.t, 1);
+    const v = Math.hypot(e.clientX - eraserGrow.x, e.clientY - eraserGrow.y) / dt;
+    eraserGrow.x = e.clientX; eraserGrow.y = e.clientY; eraserGrow.t = e.timeStamp;
+    eraserGrow.v += (v - eraserGrow.v) * Math.min(1, dt/40);
+    const target = 1 + (ERASER_MAX_GROW-1) * clamp((eraserGrow.v - ERASER_SLOW)/(ERASER_FAST - ERASER_SLOW), 0, 1);
+    eraserGrow.g += (target - eraserGrow.g) * Math.min(1, dt/(target > eraserGrow.g ? 60 : 250));
+    return eraserGrow.g;
+  }
   function startStroke(e, t){
     if(e.pointerType === 'pen') isPenActive = true;
     drawPointerId = e.pointerId;
     const pos = rectPos(e);
     const w = screenToWorld(pos.x, pos.y, currentTransform());
     currentStroke = { tool: t, color: penColor, width: widths[t], points: [{ x:w.x, y:w.y, p: e.pressure || 0.5 }] };
+    eraserGrow.x = e.clientX; eraserGrow.y = e.clientY; eraserGrow.t = e.timeStamp; eraserGrow.v = 0; eraserGrow.g = 1;
     currentPage().strokes.push(currentStroke);
     pushHistory({ type:'add', stroke: currentStroke });
     markDirty();
@@ -997,7 +1015,13 @@
     if(!currentStroke){ startStroke(e, t); return; }
     const pos = rectPos(e);
     const w = screenToWorld(pos.x, pos.y, currentTransform());
-    currentStroke.points.push({ x:w.x, y:w.y, p: e.pressure || 0.5 }); markDirty();
+    const pt = { x:w.x, y:w.y, p: e.pressure || 0.5 };
+    if(t === 'eraser'){
+      const g = updateEraserGrow(e);
+      if(g > 1.01) pt.g = Math.round(g*100)/100;
+      eraserHover.g = g; placeEraserCursor();
+    }
+    currentStroke.points.push(pt); markDirty();
     render();
   }
 
@@ -1253,7 +1277,7 @@
   }
   function strokeSvg(s, color){
     const pts = s.points;
-    const wAt = p => s.width*(0.5+0.5*(p.p ?? 0.5));
+    const wAt = p => pointWidth(s, p);
     if(pts.length === 1){
       const p = pts[0];
       return '<circle cx="'+r1(p.x)+'" cy="'+r1(p.y)+'" r="'+r1(Math.max(wAt(p)/2, 0.3))+'" fill="'+color+'" stroke="none"/>';
@@ -1344,7 +1368,11 @@
         width: clamp(Number(s && s.width) || 3, 1, 80),
         points: (Array.isArray(s && s.points) ? s.points : [])
           .filter(p=>p && Number.isFinite(p.x) && Number.isFinite(p.y))
-          .map(p=>({ x:p.x, y:p.y, p: Number.isFinite(p.p) ? clamp(p.p,0,1) : 0.5 }))
+          .map(p=>{
+            const q = { x:p.x, y:p.y, p: Number.isFinite(p.p) ? clamp(p.p,0,1) : 0.5 };
+            if(Number.isFinite(p.g) && p.g > 1) q.g = Math.min(p.g, ERASER_MAX_GROW);
+            return q;
+          })
       })).filter(s=>s.points.length > 0);
       return page;
     });
