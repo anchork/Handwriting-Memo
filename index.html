@@ -734,9 +734,12 @@
   // ---------- eraser outline (mouse / pen hover) ----------
   // An HTML overlay moved with a CSS transform, so it never redraws the canvas.
   const eraserCursor = document.getElementById('eraser-cursor');
-  const eraserHover = { visible:false, x:0, y:0, p:0.5 };
+  const eraserHover = { visible:false, x:0, y:0, p:0.5, forced:false };
   function placeEraserCursor(){
-    if(!eraserHover.visible || tool !== 'eraser'){
+    const erasing = tool === 'eraser' || eraserHover.forced;
+    pencilBtn.classList.toggle('active', !erasing);
+    eraserBtn.classList.toggle('active', erasing);
+    if(!eraserHover.visible || !erasing){
       eraserCursor.style.display = 'none';
       canvas.classList.remove('eraser-hover');
       return;
@@ -753,9 +756,10 @@
     eraserHover.visible = true;
     eraserHover.x = e.clientX; eraserHover.y = e.clientY;
     eraserHover.p = e.pressure > 0 ? e.pressure : 0.5; // hovering reports 0
+    eraserHover.forced = e.pointerType === 'pen' && (e.buttons & (2 | 32)) !== 0;
     placeEraserCursor();
   }
-  function hideEraserCursor(){ eraserHover.visible = false; placeEraserCursor(); }
+  function hideEraserCursor(){ eraserHover.visible = false; eraserHover.forced = false; placeEraserCursor(); }
 
   function setTool(t){
     tool = t;
@@ -944,16 +948,46 @@
       mousePan = { startX: pos.x, startY: pos.y, start: { ...currentTransform() } };
       return;
     }
+    handleDrawPointer(e);
+  });
+
+  // ---------- pen / mouse drawing ----------
+  // PointerEvent buttons bits: 1 = tip / left button, 2 = pen barrel (side) button,
+  // 32 = pen eraser end. Chorded changes (tip down while the barrel is held, barrel
+  // pressed mid-stroke, ...) arrive as pointermove, not pointerdown/up, so contact
+  // and tool are re-evaluated on every event.
+  const PEN_ERASE_BUTTONS = 2 | 32;
+  function penWantsEraser(e){ return e.pointerType === 'pen' && (e.buttons & PEN_ERASE_BUTTONS) !== 0; }
+  function inContact(e){
+    if(e.buttons & 1) return true;
+    // eraser end: some platforms also report bit 32 while hovering, so require pressure
+    return e.pointerType === 'pen' && (e.buttons & 32) !== 0 && e.pressure > 0;
+  }
+  function startStroke(e, t){
     if(e.pointerType === 'pen') isPenActive = true;
     drawPointerId = e.pointerId;
     const pos = rectPos(e);
     const w = screenToWorld(pos.x, pos.y, currentTransform());
-    currentStroke = { tool: tool, color: penColor, width: widths[tool], points: [{ x:w.x, y:w.y, p: e.pressure || 0.5 }] };
+    currentStroke = { tool: t, color: penColor, width: widths[t], points: [{ x:w.x, y:w.y, p: e.pressure || 0.5 }] };
     currentPage().strokes.push(currentStroke);
     pushHistory({ type:'add', stroke: currentStroke });
     markDirty();
     render();
-  });
+  }
+  function endStroke(){
+    currentStroke = null; drawPointerId = null; isPenActive = false;
+  }
+  function handleDrawPointer(e){
+    if(drawPointerId !== null && e.pointerId !== drawPointerId) return;
+    if(!inContact(e)){ if(currentStroke) endStroke(); return; }
+    const t = penWantsEraser(e) ? 'eraser' : tool;
+    if(currentStroke && currentStroke.tool !== t) endStroke(); // barrel pressed / released mid-stroke
+    if(!currentStroke){ startStroke(e, t); return; }
+    const pos = rectPos(e);
+    const w = screenToWorld(pos.x, pos.y, currentTransform());
+    currentStroke.points.push({ x:w.x, y:w.y, p: e.pressure || 0.5 }); markDirty();
+    render();
+  }
 
   canvas.addEventListener('pointermove', e=>{
     trackEraserCursor(e);
@@ -1002,11 +1036,7 @@
       render();
       return;
     }
-    if(!currentStroke || e.pointerId !== drawPointerId) return;
-    const pos = rectPos(e);
-    const w = screenToWorld(pos.x, pos.y, currentTransform());
-    currentStroke.points.push({ x:w.x, y:w.y, p: e.pressure || 0.5 }); markDirty();
-    render();
+    handleDrawPointer(e);
   });
 
   function endPointer(e){
@@ -1016,9 +1046,10 @@
       else gestureStart = null;
       return;
     }
+    if(e.pointerId === drawPointerId) endStroke();
     if(e.pointerType === 'pen') isPenActive = false;
-    if(e.pointerId === drawPointerId){ currentStroke = null; drawPointerId = null; }
     mousePan = null;
+    if(e.type !== 'pointerleave') trackEraserCursor(e);
   }
   canvas.addEventListener('pointerup', endPointer);
   canvas.addEventListener('pointercancel', endPointer);
