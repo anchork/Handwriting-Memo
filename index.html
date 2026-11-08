@@ -299,7 +299,7 @@
       <button class="chip primary" id="binder-close">メモに戻る</button>
     </div>
   </div>
-  <p class="bs-note">PDFは閲覧用です。あとで編集を続けたいバインダーは「データ保存」で保存してください(読み込みで復元できます)。保存しないままブラウザを閉じると、バインダーは消えます。</p>
+  <p class="bs-note">バインダーは、この端末のブラウザ内に自動で保存されます(閉じても残ります)。PDFは閲覧・共有用、「データ保存」は別の端末への移行やバックアップ用です。ブラウザのサイトデータを消去すると、保存内容も消えます。</p>
   <div id="binder-grid"></div>
   <input type="file" id="import-file" accept=".json,application/json" hidden>
 </div>
@@ -350,6 +350,7 @@
   let widths = { pencil: 3, eraser: 20 };
   let penColor = 'ink';
   let dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  let darkOverride = null;
 
   function currentPage(){ return pages[pageIndex]; }
   function currentTransform(){ return currentPage().transform; }
@@ -423,11 +424,11 @@
   applyTheme();
   if(window.matchMedia){
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e=>{
-      dark = e.matches; applyTheme();
+      if(darkOverride === null){ dark = e.matches; applyTheme(); }
     });
   }
   document.getElementById('theme-toggle').addEventListener('click', ()=>{
-    dark = !dark; applyTheme();
+    dark = !dark; darkOverride = dark; applyTheme(); scheduleSave();
   });
 
   // ---------- tool selection ----------
@@ -442,15 +443,19 @@
     thickness.max = t==='pencil' ? 20 : 80;
     thickness.value = widths[t];
   }
-  pencilBtn.addEventListener('click', ()=>setTool('pencil'));
-  eraserBtn.addEventListener('click', ()=>setTool('eraser'));
-  thickness.addEventListener('input', ()=>{ widths[tool] = Number(thickness.value); });
+  pencilBtn.addEventListener('click', ()=>{ setTool('pencil'); scheduleSave(); });
+  eraserBtn.addEventListener('click', ()=>{ setTool('eraser'); scheduleSave(); });
+  thickness.addEventListener('input', ()=>{ widths[tool] = Number(thickness.value); scheduleSave(); });
   setTool('pencil');
+  function setPenColor(key){
+    penColor = key;
+    document.querySelectorAll('.swatch').forEach(x=>x.classList.toggle('active', x.dataset.color === key));
+  }
   document.querySelectorAll('.swatch').forEach(b=>{
     b.addEventListener('click', ()=>{
-      penColor = b.dataset.color;
-      document.querySelectorAll('.swatch').forEach(x=>x.classList.toggle('active', x===b));
+      setPenColor(b.dataset.color);
       setTool('pencil');
+      scheduleSave();
     });
   });
 
@@ -462,14 +467,14 @@
     pageDeleteBtn.disabled = pages.length <= 1;
   }
   document.getElementById('page-prev').addEventListener('click', ()=>{
-    if(pageIndex>0){ pageIndex--; refreshPageLabel(); render(); }
+    if(pageIndex>0){ pageIndex--; refreshPageLabel(); render(); markDirty(); }
   });
   document.getElementById('page-next').addEventListener('click', ()=>{
-    if(pageIndex<pages.length-1){ pageIndex++; refreshPageLabel(); render(); }
+    if(pageIndex<pages.length-1){ pageIndex++; refreshPageLabel(); render(); markDirty(); }
   });
   document.getElementById('page-add').addEventListener('click', ()=>{
     pages.splice(pageIndex+1, 0, newPage());
-    pageIndex++; refreshPageLabel(); render();
+    pageIndex++; refreshPageLabel(); render(); markDirty();
   });
   let pageDelArmed = false, pageDelTimer = null;
   pageDeleteBtn.addEventListener('click', ()=>{
@@ -484,7 +489,7 @@
     disarmPageDelete();
     pages.splice(pageIndex,1);
     pageIndex = clamp(pageIndex, 0, pages.length-1);
-    refreshPageLabel(); render();
+    refreshPageLabel(); render(); markDirty();
   });
   function disarmPageDelete(){
     clearTimeout(pageDelTimer);
@@ -550,7 +555,7 @@
     const pos = rectPos(e);
     const w = screenToWorld(pos.x, pos.y, currentTransform());
     currentStroke = { tool: tool, color: penColor, width: widths[tool], points: [{ x:w.x, y:w.y, p: e.pressure || 0.5 }] };
-    currentPage().strokes.push(currentStroke);
+    currentPage().strokes.push(currentStroke); markDirty();
     render();
   });
 
@@ -583,6 +588,7 @@
         t.x = mid1.x - worldMid.x*newScale;
         t.y = mid1.y - worldMid.y*newScale;
       }
+      markDirty();
       render();
       return;
     }
@@ -591,13 +597,14 @@
       const t = currentTransform();
       t.x = mousePan.start.x + (pos.x - mousePan.startX);
       t.y = mousePan.start.y + (pos.y - mousePan.startY);
+      markDirty();
       render();
       return;
     }
     if(!currentStroke || e.pointerId !== drawPointerId) return;
     const pos = rectPos(e);
     const w = screenToWorld(pos.x, pos.y, currentTransform());
-    currentStroke.points.push({ x:w.x, y:w.y, p: e.pressure || 0.5 });
+    currentStroke.points.push({ x:w.x, y:w.y, p: e.pressure || 0.5 }); markDirty();
     render();
   });
 
@@ -627,6 +634,7 @@
     t.scale = newScale;
     t.x = pos.x - worldBefore.x*newScale;
     t.y = pos.y - worldBefore.y*newScale;
+    markDirty();
     render();
   }, { passive:false });
 
@@ -680,8 +688,9 @@
     for(let i=0;i<pageList.length;i++){
       const { canvas: off, w, h } = renderPageForExport(pageList[i]);
       const img = off.toDataURL('image/png');
-      if(!pdf) pdf = new jsPDF({ unit:'px', format:[w,h], compress:true });
-      else pdf.addPage([w,h]);
+      const orient = w >= h ? 'landscape' : 'portrait';
+      if(!pdf) pdf = new jsPDF({ orientation: orient, unit:'px', format:[w,h], compress:true });
+      else pdf.addPage([w,h], orient);
       pdf.addImage(img, 'PNG', 0, 0, w, h);
     }
     return pdf.output('blob');
@@ -779,6 +788,7 @@
     binderIndex = i;
     loadBinder();
     closeBinderScreen();
+    scheduleSave();
   }
 
   function deleteBinder(i){
@@ -786,10 +796,12 @@
     if(autosaveBinderId === b.id) stopAutosave();
     binders[binderIndex].pageIndex = pageIndex;
     const wasCurrent = (i === binderIndex);
+    deleted.add(b.id); dirty.delete(b.id);
     binders.splice(i, 1);
-    if(binders.length === 0){ binders.push(newBinder()); binderIndex = 0; loadBinder(); }
+    if(binders.length === 0){ const nb = newBinder(); binders.push(nb); markDirty(nb); binderIndex = 0; loadBinder(); }
     else if(wasCurrent){ binderIndex = Math.min(i, binders.length-1); loadBinder(); }
     else if(i < binderIndex){ binderIndex--; }
+    scheduleSave();
     renderBinderScreen();
     toast('バインダーを削除しました');
   }
@@ -820,12 +832,12 @@
       name.type = 'text'; name.value = b.name; name.maxLength = 30;
       name.setAttribute('aria-label', 'バインダー名');
       name.addEventListener('input', ()=>{
-        b.name = name.value;
+        b.name = name.value; markDirty(b);
         if(i === binderIndex) binderLabel.textContent = b.name || '無題';
       });
       name.addEventListener('blur', ()=>{
         if(!name.value.trim()){
-          b.name = '無題'; name.value = '無題';
+          b.name = '無題'; name.value = '無題'; markDirty(b);
           if(i === binderIndex) binderLabel.textContent = '無題';
         }
       });
@@ -871,7 +883,7 @@
   }
 
   document.getElementById('binder-new').addEventListener('click', ()=>{
-    binders.push(newBinder());
+    const nb = newBinder(); binders.push(nb); markDirty(nb);
     renderBinderScreen();
     const inputs = binderGrid.querySelectorAll('.name');
     const last = inputs[inputs.length-1];
@@ -889,7 +901,7 @@
     if(!f) return;
     try{
       const obj = JSON.parse(await f.text());
-      binders.push(sanitizeBinder(obj));
+      const nb = sanitizeBinder(obj); binders.push(nb); markDirty(nb);
       renderBinderScreen();
       toast('バインダーを読み込みました');
     }catch(err){
@@ -948,9 +960,114 @@
     }
   }
 
+  // ---------- persistence (IndexedDB) ----------
+  let db = null, loaded = false, saveTimer = null;
+  const dirty = new Set(), deleted = new Set();
+
+  function reqP(r){
+    return new Promise((res, rej)=>{ r.onsuccess = ()=>res(r.result); r.onerror = ()=>rej(r.error); });
+  }
+  function openDB(){
+    return new Promise((resolve, reject)=>{
+      if(!('indexedDB' in window)) return reject(new Error('IndexedDB unavailable'));
+      const r = indexedDB.open('handwriting-memo', 1);
+      r.onupgradeneeded = ()=>{
+        const d = r.result;
+        if(!d.objectStoreNames.contains('binders')) d.createObjectStore('binders', { keyPath: 'id' });
+        if(!d.objectStoreNames.contains('meta')) d.createObjectStore('meta');
+      };
+      r.onsuccess = ()=>resolve(r.result);
+      r.onerror = ()=>reject(r.error);
+      r.onblocked = ()=>reject(new Error('blocked'));
+    });
+  }
+
+  function markDirty(b){
+    const target = b || binders[binderIndex];
+    if(target) dirty.add(target.id);
+    scheduleSave();
+  }
+  function scheduleSave(){
+    if(!loaded || saveTimer) return;
+    saveTimer = setTimeout(persistNow, 1500);
+  }
+  function persistNow(){
+    if(!db || !loaded) return;
+    clearTimeout(saveTimer); saveTimer = null;
+    try{
+      binders[binderIndex].pageIndex = pageIndex;
+      const tx = db.transaction(['binders', 'meta'], 'readwrite');
+      const bs = tx.objectStore('binders');
+      dirty.forEach(id=>{ const b = binders.find(x=>x.id === id); if(b) bs.put(b); });
+      deleted.forEach(id=>bs.delete(id));
+      tx.objectStore('meta').put({
+        order: binders.map(b=>b.id), binderIndex, darkOverride, tool, widths: { ...widths }, penColor
+      }, 'meta');
+      dirty.clear(); deleted.clear();
+      tx.onabort = ()=>{
+        if(!persistNow._warned){ persistNow._warned = true; toast('端末への保存に失敗しました(容量不足の可能性があります)', 4000); }
+      };
+    }catch(err){
+      console.warn('save failed', err);
+    }
+  }
+
+  function validBinder(b){
+    return b && typeof b.id === 'string' && Array.isArray(b.pages) && b.pages.length > 0 &&
+      b.pages.every(p=>p && Array.isArray(p.strokes) && p.transform && Number.isFinite(p.transform.scale));
+  }
+
+  async function loadState(){
+    db = await openDB();
+    db.onversionchange = ()=>{ db.close(); db = null; };
+    const tx = db.transaction(['binders', 'meta'], 'readonly');
+    const [list, meta] = await Promise.all([
+      reqP(tx.objectStore('binders').getAll()),
+      reqP(tx.objectStore('meta').get('meta'))
+    ]);
+    const valid = list.filter(validBinder);
+    if(valid.length){
+      const byId = new Map(valid.map(b=>[b.id, b]));
+      const ordered = [];
+      ((meta && meta.order) || []).forEach(id=>{
+        if(byId.has(id)){ ordered.push(byId.get(id)); byId.delete(id); }
+      });
+      byId.forEach(b=>ordered.push(b));
+      binders = ordered;
+      binderIndex = clamp(meta && Number.isInteger(meta.binderIndex) ? meta.binderIndex : 0, 0, binders.length-1);
+      binderSeq = binders.length + 1;
+    }
+    if(meta){
+      if(typeof meta.darkOverride === 'boolean'){ darkOverride = meta.darkOverride; dark = darkOverride; applyTheme(); }
+      if(meta.widths){
+        widths.pencil = clamp(Number(meta.widths.pencil) || 3, 1, 20);
+        widths.eraser = clamp(Number(meta.widths.eraser) || 20, 4, 80);
+      }
+      if(meta.penColor === 'red' || meta.penColor === 'yellow' || meta.penColor === 'ink') setPenColor(meta.penColor);
+      setTool(meta.tool === 'eraser' ? 'eraser' : 'pencil');
+    }
+    return valid.length > 0;
+  }
+
+  document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState === 'hidden') persistNow(); });
+  window.addEventListener('pagehide', persistNow);
+
   // ---------- init ----------
-  loadBinder();
-  resize();
+  (async function init(){
+    try{
+      const hadData = await loadState();
+      loaded = true;
+      if(!hadData) dirty.add(binders[0].id);
+      try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist(); }catch(e){}
+    }catch(err){
+      console.warn('persistence unavailable', err);
+      db = null; loaded = false;
+      toast('この環境では端末への自動保存が使えません', 3500);
+    }
+    loadBinder();
+    resize();
+    if(loaded) persistNow();
+  })();
 })();
 </script>
 <script>
