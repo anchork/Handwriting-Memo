@@ -452,8 +452,8 @@
   let dpr = window.devicePixelRatio || 1;
   function resize(){
     dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.round(window.innerWidth * dpr);
-    canvas.height = Math.round(window.innerHeight * dpr);
+    const w = Math.round(window.innerWidth * dpr), h = Math.round(window.innerHeight * dpr);
+    if(canvas.width !== w || canvas.height !== h){ canvas.width = w; canvas.height = h; } // resizing clears and reallocates
     render();
   }
   window.addEventListener('resize', resize);
@@ -471,15 +471,19 @@
   function pointWidth(s, p){ return s.width*(0.5+0.5*(p.p ?? 0.5))*(p.g || 1); }
   function strokePad(s){ return s.tool === 'eraser' ? s.width*ERASER_MAX_GROW/2 + 1 : s.width; }
   function strokeBBox(s){
-    const c = strokeBoxes.get(s);
-    if(c && c.n === s.points.length) return c;
-    let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
-    for(const p of s.points){
+    const c = strokeBoxes.get(s), n = s.points.length;
+    if(c && c.n === n) return c;
+    const r = strokePad(s);
+    let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity, k = 0;
+    if(c && c.n < n){ // stroke being drawn: only scan the new points
+      minX = c.minX+r; minY = c.minY+r; maxX = c.maxX-r; maxY = c.maxY-r; k = c.n;
+    }
+    for(; k<n; k++){
+      const p = s.points[k];
       if(p.x<minX)minX=p.x; if(p.x>maxX)maxX=p.x;
       if(p.y<minY)minY=p.y; if(p.y>maxY)maxY=p.y;
     }
-    const r = strokePad(s);
-    const box = { n: s.points.length, minX:minX-r, minY:minY-r, maxX:maxX+r, maxY:maxY+r };
+    const box = { n, minX:minX-r, minY:minY-r, maxX:maxX+r, maxY:maxY+r };
     strokeBoxes.set(s, box);
     return box;
   }
@@ -529,7 +533,7 @@
   // Tiles: TILE x TILE device-px bitmaps on a grid in "world * S" space
   // (S = zoom * devicePixelRatio). A tile is rendered once from the vector data and
   // then just blitted while panning; new pen input is drawn into existing tiles.
-  const TILE = 512, MAX_TILES = 80, TILE_BUDGET_MS = 10;
+  const TILE = 512, TILE_BUDGET_MS = 10, POOL_MAX = 8;
   const tilePool = [];
   let tiles = null;     // current tile set
   let oldTiles = null;  // previous zoom level, shown underneath while new tiles fill in
@@ -543,8 +547,19 @@
   }
   function releaseTileSet(ts){
     if(!ts) return;
-    ts.map.forEach(c=>{ if(c && tilePool.length < 8) tilePool.push(c); });
+    ts.map.forEach(freeTile);
     ts.map.clear();
+  }
+  // keep a few tiles for reuse; shrink the rest so the browser frees their memory now
+  // (iOS Safari has a hard total canvas memory limit and releases canvases lazily)
+  function freeTile(c){
+    if(!c) return;
+    if(tilePool.length < POOL_MAX) tilePool.push(c);
+    else c.canvas.width = c.canvas.height = 0;
+  }
+  // visible tiles + the prefetched ring around them + a little slack
+  function maxTiles(){
+    return (Math.ceil(canvas.width/TILE)+3) * (Math.ceil(canvas.height/TILE)+3) + 4;
   }
   function allocTile(){
     const c = tilePool.pop() || (()=>{ const cv = document.createElement('canvas'); cv.width = cv.height = TILE; return { canvas: cv, ctx: cv.getContext('2d') }; })();
@@ -636,15 +651,15 @@
   function evictTiles(ts, ox, oy){
     let count = 0;
     ts.map.forEach(c=>{ if(c) count++; });
-    if(count <= MAX_TILES) return;
+    const max = maxTiles();
+    if(count <= max) return;
     const ci = (canvas.width/2 - ox)/TILE, cj = (canvas.height/2 - oy)/TILE;
     const list = [];
     ts.map.forEach((c, key)=>{ if(c){ const [i, j] = key.split(',').map(Number); list.push([Math.hypot(i+0.5-ci, j+0.5-cj), key]); } });
     list.sort((a, b)=>b[0]-a[0]);
-    for(let n=0; n<count-MAX_TILES; n++){
+    for(let n=0; n<count-max; n++){
       const key = list[n][1];
-      const c = ts.map.get(key);
-      if(tilePool.length < 8) tilePool.push(c);
+      freeTile(ts.map.get(key));
       ts.map.delete(key);
     }
   }
@@ -752,21 +767,30 @@
   // An HTML overlay moved with a CSS transform, so it never redraws the canvas.
   const eraserCursor = document.getElementById('eraser-cursor');
   const eraserHover = { visible:false, x:0, y:0, p:0.5, g:1, forced:false };
+  // runs on every pointer move and frame: only write to the DOM what actually changed
+  const cursorDom = { erasing:null, shown:null, d:NaN, x:NaN, y:NaN };
   function placeEraserCursor(){
     const erasing = tool === 'eraser' || eraserHover.forced;
-    pencilBtn.classList.toggle('active', !erasing);
-    eraserBtn.classList.toggle('active', erasing);
-    if(!eraserHover.visible || !erasing){
-      eraserCursor.style.display = 'none';
-      canvas.classList.remove('eraser-hover');
-      return;
+    if(cursorDom.erasing !== erasing){
+      cursorDom.erasing = erasing;
+      pencilBtn.classList.toggle('active', !erasing);
+      eraserBtn.classList.toggle('active', erasing);
     }
+    const shown = eraserHover.visible && erasing;
+    if(cursorDom.shown !== shown){
+      cursorDom.shown = shown;
+      eraserCursor.style.display = shown ? 'block' : 'none';
+      canvas.classList.toggle('eraser-hover', shown);
+    }
+    if(!shown) return;
     // same diameter the eraser stroke uses: width * zoom * pressure factor
-    const d = Math.max(widths.eraser * currentTransform().scale * (0.5 + 0.5*eraserHover.p) * eraserHover.g, 4);
-    eraserCursor.style.display = 'block';
-    eraserCursor.style.width = eraserCursor.style.height = d + 'px';
-    eraserCursor.style.transform = 'translate(' + (eraserHover.x - d/2) + 'px,' + (eraserHover.y - d/2) + 'px)';
-    canvas.classList.add('eraser-hover');
+    const d = Math.round(Math.max(widths.eraser * currentTransform().scale * (0.5 + 0.5*eraserHover.p) * eraserHover.g, 4)*4)/4;
+    const resized = d !== cursorDom.d;
+    if(resized){ cursorDom.d = d; eraserCursor.style.width = eraserCursor.style.height = d + 'px'; }
+    if(resized || eraserHover.x !== cursorDom.x || eraserHover.y !== cursorDom.y){
+      cursorDom.x = eraserHover.x; cursorDom.y = eraserHover.y;
+      eraserCursor.style.transform = 'translate(' + (eraserHover.x - d/2) + 'px,' + (eraserHover.y - d/2) + 'px)';
+    }
   }
   function trackEraserCursor(e){
     if(e.pointerType === 'touch') return;
@@ -781,8 +805,6 @@
 
   function setTool(t){
     tool = t;
-    pencilBtn.classList.toggle('active', t==='pencil');
-    eraserBtn.classList.toggle('active', t==='eraser');
     thickness.min = t==='pencil' ? 1 : 4;
     thickness.max = t==='pencil' ? 20 : 80;
     thickness.value = widths[t];
@@ -821,11 +843,12 @@
   const undoBtn = document.getElementById('undo');
   const redoBtn = document.getElementById('redo');
   const clearBtn = document.getElementById('page-clear');
+  function setDisabled(b, v){ if(b.disabled !== v) b.disabled = v; }
   function updateHistoryButtons(){
     const h = historyOf(currentPage());
-    undoBtn.disabled = h.undo.length === 0;
-    redoBtn.disabled = h.redo.length === 0;
-    clearBtn.disabled = currentPage().strokes.length === 0;
+    setDisabled(undoBtn, h.undo.length === 0);
+    setDisabled(redoBtn, h.redo.length === 0);
+    setDisabled(clearBtn, currentPage().strokes.length === 0);
   }
   function undo(){
     if(currentStroke) return;
@@ -1112,8 +1135,11 @@
   const zoomLockBtn = document.getElementById('zoom-lock');
   let zoomLocked = false;
 
+  let zoomUIScale = NaN;
   function updateZoomUI(){
     const sc = currentTransform().scale;
+    if(sc === zoomUIScale) return; // called every frame: touch the DOM only when the zoom changed
+    zoomUIScale = sc;
     const preset = [...zoomSelect.options].find(o=>o !== zoomCustom && Math.abs(Number(o.value) - sc) < 0.005);
     if(preset){ zoomCustom.hidden = true; zoomSelect.value = preset.value; }
     else{
@@ -1440,6 +1466,16 @@
     return c;
   }
 
+  // thumbnails are cached until the binder changes (markDirty drops the entry)
+  const thumbs = new WeakMap();
+  function thumbnailOf(b){
+    let url = thumbs.get(b);
+    if(url === undefined){
+      try{ url = renderPageForExport(b.pages[0], 360, 1).canvas.toDataURL('image/jpeg', 0.8); }catch(e){ url = ''; }
+      thumbs.set(b, url);
+    }
+    return url;
+  }
   function renderBinderScreen(){
     binderGrid.innerHTML = '';
     binders.forEach((b, i)=>{
@@ -1448,7 +1484,7 @@
       const thumb = el('div', 'thumb');
       const img = document.createElement('img');
       img.alt = ''; img.draggable = false;
-      try{ img.src = renderPageForExport(b.pages[0], 360, 1).canvas.toDataURL('image/jpeg', 0.8); }catch(e){}
+      img.src = thumbnailOf(b);
       thumb.appendChild(img);
       thumb.addEventListener('click', ()=>openBinder(i));
       card.appendChild(thumb);
@@ -1698,7 +1734,7 @@
   }
   function markDirty(b){
     const target = b || binders[binderIndex];
-    if(target){ dirty.add(target.id); fileDirty.add(target.id); }
+    if(target){ dirty.add(target.id); fileDirty.add(target.id); thumbs.delete(target); }
     scheduleSave();
     scheduleFileSave();
   }
