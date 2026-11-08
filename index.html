@@ -981,7 +981,7 @@
     // eraser end: some platforms also report bit 32 while hovering, so require pressure
     return e.pointerType === 'pen' && (e.buttons & 32) !== 0 && e.pressure > 0;
   }
-  // smoothed screen-space speed -> growth factor; grows quickly, shrinks back gently
+  // smoothed screen-space speed -> growth factor; only grows, stays until the pen is lifted
   const eraserGrow = { x:0, y:0, t:0, v:0, g:1 };
   function updateEraserGrow(e){
     const dt = Math.max(e.timeStamp - eraserGrow.t, 1);
@@ -989,7 +989,7 @@
     eraserGrow.x = e.clientX; eraserGrow.y = e.clientY; eraserGrow.t = e.timeStamp;
     eraserGrow.v += (v - eraserGrow.v) * Math.min(1, dt/40);
     const target = 1 + (ERASER_MAX_GROW-1) * clamp((eraserGrow.v - ERASER_SLOW)/(ERASER_FAST - ERASER_SLOW), 0, 1);
-    eraserGrow.g += (target - eraserGrow.g) * Math.min(1, dt/(target > eraserGrow.g ? 60 : 250));
+    if(target > eraserGrow.g) eraserGrow.g += (target - eraserGrow.g) * Math.min(1, dt/60);
     return eraserGrow.g;
   }
   function startStroke(e, t){
